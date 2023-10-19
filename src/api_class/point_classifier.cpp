@@ -120,8 +120,8 @@ void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& 
         V.col(0) *= -1;
     }
 
-    double major_axis = 2* sqrt(S(0, 0));
-    double minor_axis = 2* sqrt(S(1, 1));
+    double major_axis = S(0, 0);//2* sqrt(S(0, 0));
+    double minor_axis = S(1, 1);//2* sqrt(S(1, 1));
     //===========Extract Conic Matrix=========
     Eigen::Matrix3d conic = Eigen::Matrix3d::Zero();
     Eigen::Matrix3d H = Eigen::Matrix3d::Identity();
