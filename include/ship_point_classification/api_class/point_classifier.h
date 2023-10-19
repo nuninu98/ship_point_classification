@@ -23,17 +23,20 @@ typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::PointCloud2
 using namespace std;
 class PointClassifier{
     private:
-        ros::NodeHandle nh_;
+        ros::NodeHandle nh_, private_nh_;
         ros::CallbackQueue queue_;
         ros::AsyncSpinner spinner_;
-        tf2_ros::Buffer buffer_;
-        tf2_ros::TransformListener listener_;
-        Eigen::Matrix4d lidar1_tf_, lidar2_tf_;
-        message_filters::Subscriber<sensor_msgs::PointCloud2> cloud1_sub_, cloud2_sub_;
-        message_filters::Synchronizer<ApproxPolicy> sync_;
+        double layer_crop_thickness_;
+        // tf2_ros::Buffer buffer_;
+        // tf2_ros::TransformListener listener_;
+        // Eigen::Matrix4d lidar1_tf_, lidar2_tf_;
+        // message_filters::Subscriber<sensor_msgs::PointCloud2> cloud1_sub_, cloud2_sub_;
+        // message_filters::Synchronizer<ApproxPolicy> sync_;
+        // void pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& point1, const sensor_msgs::PointCloud2ConstPtr& point2);
 
+        ros::Subscriber sub_ship_points_;
+        void pointCloudCallback(const sensor_msgs::PointCloud2ConstPtr& point);
         pcl::EuclideanClusterExtraction<pcl::PointXYZI> ec_;
-        void pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& point1, const sensor_msgs::PointCloud2ConstPtr& point2);
         double algebraicDist(double x, double y, const Eigen::Matrix3d& conic);
         double geometricDist(double x, double y, const Eigen::Matrix3d& conic);
         //=========For Debug==========

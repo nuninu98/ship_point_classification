@@ -1,25 +1,12 @@
 #include <ship_point_classification/api_class/point_classifier.h>
 
-PointClassifier::PointClassifier(): buffer_(), listener_(buffer_), queue_(), spinner_(0, &queue_), cloud1_sub_(nh_, "/ouster1/points", 1), 
-cloud2_sub_(nh_, "/ouster2/points", 1), sync_(ApproxPolicy(10), cloud1_sub_, cloud2_sub_){
+PointClassifier::PointClassifier():  queue_(), spinner_(0, &queue_), private_nh_("~"){
     nh_.setCallbackQueue(&queue_);
-    sync_.registerCallback(boost::bind(&PointClassifier::pointSyncCallback, this, _1, _2));
 
-    lidar1_tf_ = Eigen::Matrix4d::Identity();
-    lidar1_tf_(0, 3) = (3.325/ 2.0);
-    lidar1_tf_(1, 3) = -(1.415/ 2.0);
-    lidar1_tf_(0, 0) = cos(-M_PI/2);
-    lidar1_tf_(0, 1) = -sin(-M_PI/2);
-    lidar1_tf_(1, 0) = sin(-M_PI/2);
-    lidar1_tf_(1, 1) = cos(-M_PI/2);
-
-    lidar2_tf_ = Eigen::Matrix4d::Identity();
-    lidar2_tf_(0, 3) = -(3.325/ 2.0);
-    lidar2_tf_(1, 3) = (1.415/ 2.0);
-    lidar2_tf_(0, 0) = cos(M_PI/2);
-    lidar2_tf_(0, 1) = -sin(M_PI/2);
-    lidar2_tf_(1, 0) = sin(M_PI/2);
-    lidar2_tf_(1, 1) = cos(M_PI/2);
+    string topic;
+    private_nh_.param<string>("ship_pointcloud_topic", topic, "/ouster/clustered");
+    private_nh_.param<double>("layer_crop_thickness", layer_crop_thickness_, 0.1);
+    sub_ship_points_ = nh_.subscribe(topic, 1, &PointClassifier::pointCloudCallback, this);
     ec_.setClusterTolerance(1.0);
     ec_.setMinClusterSize(5);
     pub_merged_scan_ = nh_.advertise<sensor_msgs::PointCloud2>("ouster_merged", 1);
@@ -35,46 +22,15 @@ PointClassifier::~PointClassifier(){
     spinner_.stop();
 }
 
-void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& point1, const sensor_msgs::PointCloud2ConstPtr& point2){
+void PointClassifier::pointCloudCallback(const sensor_msgs::PointCloud2ConstPtr& point){
     //ros::Time tic = ros::Time::now();
-    pcl::PointCloud<pcl::PointXYZI> cloud1, cloud2;
-    pcl::fromROSMsg(*point1, cloud1);
-    pcl::fromROSMsg(*point2, cloud2);
-
-    pcl::PointCloud<pcl::PointXYZI> cloud1_tf, cloud2_tf;
-    pcl::transformPointCloud(cloud1, cloud1_tf, lidar1_tf_);
-    pcl::transformPointCloud(cloud2, cloud2_tf, lidar2_tf_);
-
-    pcl::PointCloud<pcl::PointXYZI> cloud_sum = cloud1_tf + cloud2_tf;
-    pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_range_filtered(new pcl::PointCloud<pcl::PointXYZI>);
-    for(const auto& pt : cloud_sum){
-        double range = sqrt(pow(pt.x, 2) + pow(pt.y, 2) + pow(pt.z, 2));
-        if(range > 7.0){
-            cloud_range_filtered->push_back(pt);
-        }
-    }
-    pcl::search::KdTree<pcl::PointXYZI>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZI>);
-    tree->setInputCloud(cloud_range_filtered);
-    ec_.setSearchMethod(tree);
-    ec_.setInputCloud(cloud_range_filtered);
-    vector<pcl::PointIndices> cluster_indices;
-    ec_.extract(cluster_indices);
-
-    if(cluster_indices.empty()){
-        return;
-    }
-    sort(cluster_indices.begin(), cluster_indices.end(), [](const pcl::PointIndices& p1, const pcl::PointIndices& p2){
-        return p1.indices.size() > p2.indices.size();
-    });
-
+  
     pcl::PointCloud<pcl::PointXYZI> ship_cloud;
-    for(const auto& id: cluster_indices[0].indices){
-        ship_cloud.push_back((*cloud_range_filtered)[id]);
-    }
+    pcl::fromROSMsg(*point, ship_cloud);
     
     double z_cut = 0.0;
     double z_max = -1000.0;
-    double z_thickness = 0.1;
+    double layer_crop_thickness_ = 0.1;
 
     for(size_t i = 0; i < ship_cloud.size(); i++){
         z_cut += ship_cloud[i].z / ship_cloud.size();
@@ -137,10 +93,10 @@ void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& 
     //========================================
     
     vector<pcl::PointCloud<pcl::PointXYZI>> ship_cloud_layer;
-    for(double z = z_cut; z <= z_max; z += z_thickness){ // Splitting Ship Pointcloud
+    for(double z = z_cut; z <= z_max; z += layer_crop_thickness_){ // Splitting Ship Pointcloud
         pcl::PointCloud<pcl::PointXYZI> layer_cloud;
         for(const auto& pt : ship_reflection_cropped){
-            if(pt.z >= z && pt.z < z + z_thickness){
+            if(pt.z >= z && pt.z < z + layer_crop_thickness_){
                 layer_cloud.push_back(pt);
             }
         }
@@ -173,18 +129,18 @@ void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& 
     }
     sensor_msgs::PointCloud2 hull_cloud_ros, cabin_cloud_ros;
     pcl::toROSMsg(hull_cloud, hull_cloud_ros);
-    hull_cloud_ros.header.frame_id = "base_link";
+    hull_cloud_ros.header.frame_id = point->header.frame_id;
     hull_cloud_ros.header.stamp = ros::Time::now();
     pub_hull_points_.publish(hull_cloud_ros);
 
     pcl::toROSMsg(cabin_cloud, cabin_cloud_ros);
-    cabin_cloud_ros.header.frame_id = "base_link";
+    cabin_cloud_ros.header.frame_id = point->header.frame_id;
     cabin_cloud_ros.header.stamp = ros::Time::now();
     pub_cabin_points_.publish(cabin_cloud_ros);
 
     //==================Visualization============
     geometry_msgs::TransformStamped ship_tf;
-    ship_tf.header.frame_id = "base_link";
+    ship_tf.header.frame_id = point->header.frame_id;
     ship_tf.header.stamp = ros::Time::now();
     ship_tf.child_frame_id = "ship";
     ship_tf.transform.translation.x = centroid(0);
@@ -200,13 +156,13 @@ void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& 
     broadcaster_.sendTransform(ship_tf);
 
     visualization_msgs::Marker quadric;
-    quadric.header.frame_id = "base_link";
+    quadric.header.frame_id = point->header.frame_id;
     quadric.header.stamp = ros::Time::now();
     quadric.type = visualization_msgs::Marker::CYLINDER;
     quadric.pose.position.x = centroid(0);
     quadric.pose.position.y = centroid(1);
     if(most_fit_id != -1){
-        quadric.pose.position.z = z_cut + z_thickness * most_fit_id;
+        quadric.pose.position.z = z_cut + layer_crop_thickness_ * most_fit_id;
     }
     else{
         quadric.pose.position.z = centroid(2);

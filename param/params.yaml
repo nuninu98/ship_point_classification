@@ -1,0 +1,2 @@
+ship_pointcloud_topic: /ouster/clustered
+layer_crop_thickness: 0.1
