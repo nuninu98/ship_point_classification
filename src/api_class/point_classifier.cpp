@@ -24,6 +24,10 @@ cloud2_sub_(nh_, "/ouster2/points", 1), sync_(ApproxPolicy(10), cloud1_sub_, clo
     ec_.setMinClusterSize(5);
     pub_merged_scan_ = nh_.advertise<sensor_msgs::PointCloud2>("ouster_merged", 1);
     pub_svd_quadric_ = nh_.advertise<visualization_msgs::Marker>("ship_quadric", 1);
+
+    pub_hull_points_ = nh_.advertise<sensor_msgs::PointCloud2>("hull_points", 1);
+    pub_cabin_points_ = nh_.advertise<sensor_msgs::PointCloud2>("cabin_points", 1);
+
     spinner_.start();
 }
 
@@ -143,13 +147,14 @@ void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& 
         ship_cloud_layer.push_back(layer_cloud);
     }
 
-    double most_fit_id = -1;
+    int most_fit_id = -1;
     size_t max_fit_points = 0;
-    for(size_t i = 0; i < ship_cloud_layer.size(); i++){
+    for(int i = ship_cloud_layer.size()-1; i >=0; i--){
         pcl::PointCloud<pcl::PointXYZI> layer = ship_cloud_layer[i];
         size_t cnt = 0;
         for(const auto& pt : layer){
-            if(abs(algebraicDist(pt.x, pt.y, conic)) < 0.1){
+            //cout<<"TEST: "<<geometricDist(pt.x, pt.y, conic)<<endl;
+            if(abs(geometricDist(pt.x, pt.y, conic)) < 0.1){
                 cnt++;
             }
         }
@@ -158,26 +163,25 @@ void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& 
             most_fit_id = i;
         }
     }
-    // cout<<"MIN: "<<min_algebraic<<endl;
-    // cout<<"ID: "<<most_fit_id<<endl;
-    // cout<<endl;
 
-    // double most_fit_id = -1;
-    // double min_algebraic = 1.0e8;
-    // for(size_t i = 0; i < ship_cloud_layer.size(); i++){
-    //     pcl::PointCloud<pcl::PointXYZI> layer = ship_cloud_layer[i];
-    //     double sum = 0.0;
-    //     for(const auto& pt : layer){
-    //         sum += pow(algebraicDist(pt.x, pt.y, conic), 2) / layer.size();
-    //     }
-    //     if(sum < min_algebraic){
-    //         min_algebraic = sum;
-    //         most_fit_id = i;
-    //     }
-    // }
-    // cout<<"MIN: "<<min_algebraic<<endl;
-    // cout<<"ID: "<<most_fit_id<<endl;
-    // cout<<endl;
+    pcl::PointCloud<pcl::PointXYZI> hull_cloud, cabin_cloud;
+    for(int id = 0; id <= most_fit_id; id++){
+        hull_cloud += ship_cloud_layer[id];
+    }
+    for(int id = most_fit_id; id < ship_cloud_layer.size(); id++){
+        cabin_cloud += ship_cloud_layer[id];
+    }
+    sensor_msgs::PointCloud2 hull_cloud_ros, cabin_cloud_ros;
+    pcl::toROSMsg(hull_cloud, hull_cloud_ros);
+    hull_cloud_ros.header.frame_id = "base_link";
+    hull_cloud_ros.header.stamp = ros::Time::now();
+    pub_hull_points_.publish(hull_cloud_ros);
+
+    pcl::toROSMsg(cabin_cloud, cabin_cloud_ros);
+    cabin_cloud_ros.header.frame_id = "base_link";
+    cabin_cloud_ros.header.stamp = ros::Time::now();
+    pub_cabin_points_.publish(cabin_cloud_ros);
+
     //==================Visualization============
     geometry_msgs::TransformStamped ship_tf;
     ship_tf.header.frame_id = "base_link";
@@ -228,4 +232,17 @@ void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& 
 double PointClassifier::algebraicDist(double x, double y, const Eigen::Matrix3d& conic){
     Eigen::Vector3d point_h(x, y, 1.0);
     return (point_h.transpose() * conic * point_h).value();
+}
+
+double PointClassifier::geometricDist(double x, double y, const Eigen::Matrix3d& conic){
+    Eigen::Vector3d point_h(x, y, 1.0);
+    double err = algebraicDist(x, y, conic);
+    // cout<<conic<<endl;
+    Eigen::Vector3d Cx = conic * point_h;
+    // Eigen::MatrixXd jacobian(2, 1);
+    // jacobian(0, 0) = 2* Cx(0);
+    // jacobian(0, 1) = 2* Cx(1);
+    // auto delta = -jacobian.transpose() * (jacobian * jacobian.transpose()).inverse() * err;
+    // return delta.norm();
+    return sqrt(pow(err, 2) / (4*(pow(Cx(0), 2) + pow(Cx(1), 2))));
 }
