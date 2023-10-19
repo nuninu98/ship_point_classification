@@ -34,7 +34,7 @@ class PointClassifier{
 
         pcl::EuclideanClusterExtraction<pcl::PointXYZI> ec_;
         void pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& point1, const sensor_msgs::PointCloud2ConstPtr& point2);
-    
+        double algebraicDist(double x, double y, const Eigen::Matrix3d& conic);
         //=========For Debug==========
         ros::Publisher pub_merged_scan_;
         ros::Publisher pub_svd_quadric_;

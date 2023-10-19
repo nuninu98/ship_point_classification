@@ -32,6 +32,7 @@ PointClassifier::~PointClassifier(){
 }
 
 void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& point1, const sensor_msgs::PointCloud2ConstPtr& point2){
+    //ros::Time tic = ros::Time::now();
     pcl::PointCloud<pcl::PointXYZI> cloud1, cloud2;
     pcl::fromROSMsg(*point1, cloud1);
     pcl::fromROSMsg(*point2, cloud2);
@@ -68,24 +69,30 @@ void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& 
     }
     
     double z_cut = 0.0;
+    double z_max = -1000.0;
+    double z_thickness = 0.1;
+
     for(size_t i = 0; i < ship_cloud.size(); i++){
         z_cut += ship_cloud[i].z / ship_cloud.size();
     }
 
     pcl::PointCloud<pcl::PointXYZI> ship_reflection_cropped;
     pcl::PointCloud<pcl::PointXYZI>::Ptr ship_flatten(new pcl::PointCloud<pcl::PointXYZI>);
+    Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
     for(const auto& pt : ship_cloud){
         auto point = pt;
         point.z = 0.0;
         if(pt.z > z_cut){
             ship_flatten->push_back(point);
             ship_reflection_cropped.push_back(pt);
+            if(pt.z > z_max){
+                z_max = pt.z;
+            }
         }
     }
 
-    Eigen::Vector2d centroid = Eigen::Vector2d::Zero();
-    for(const auto& pt : *ship_flatten){
-        Eigen::Vector2d v(pt.x, pt.y);
+    for(const auto& pt : ship_reflection_cropped){
+        Eigen::Vector3d v(pt.x, pt.y, pt.z);
         v /= ship_flatten->size();
         centroid += v;
     }
@@ -94,7 +101,7 @@ void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& 
     for(size_t i = 0; i < ship_flatten->size(); i++){
         auto pt = (*ship_flatten)[i];
         Eigen::Vector2d v(pt.x, pt.y);
-        Eigen::Vector2d error = v - centroid;
+        Eigen::Vector2d error = v - centroid.block<2, 1>(0, 0);
         disp_mat.col(i) = error;
     }
     Eigen::Matrix2d cov = disp_mat * disp_mat.transpose();
@@ -108,7 +115,69 @@ void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& 
     if(V(0, 0) * V(1, 1) < 0){
         V.col(0) *= -1;
     }
+
+    double major_axis = 2* sqrt(S(0, 0));
+    double minor_axis = 2* sqrt(S(1, 1));
+    //===========Extract Conic Matrix=========
+    Eigen::Matrix3d conic = Eigen::Matrix3d::Zero();
+    Eigen::Matrix3d H = Eigen::Matrix3d::Identity();
+    H.block<2, 2>(0, 0) = V;
+    H(0, 2) = centroid(0);
+    H(1, 2) = centroid(1);
+    conic(0, 0) = pow(1.0 / major_axis, 2);
+    conic(1, 1) = pow(1.0 / minor_axis, 2);
+    conic(2, 2) = -1;
+    conic = (H.inverse()).transpose() * conic * H.inverse();
+    // cout<<conic<<endl;
+    // cout<<endl;
+    //========================================
     
+    vector<pcl::PointCloud<pcl::PointXYZI>> ship_cloud_layer;
+    for(double z = z_cut; z <= z_max; z += z_thickness){ // Splitting Ship Pointcloud
+        pcl::PointCloud<pcl::PointXYZI> layer_cloud;
+        for(const auto& pt : ship_reflection_cropped){
+            if(pt.z >= z && pt.z < z + z_thickness){
+                layer_cloud.push_back(pt);
+            }
+        }
+        ship_cloud_layer.push_back(layer_cloud);
+    }
+
+    double most_fit_id = -1;
+    size_t max_fit_points = 0;
+    for(size_t i = 0; i < ship_cloud_layer.size(); i++){
+        pcl::PointCloud<pcl::PointXYZI> layer = ship_cloud_layer[i];
+        size_t cnt = 0;
+        for(const auto& pt : layer){
+            if(abs(algebraicDist(pt.x, pt.y, conic)) < 0.1){
+                cnt++;
+            }
+        }
+        if(max_fit_points < cnt){
+            max_fit_points = cnt;
+            most_fit_id = i;
+        }
+    }
+    // cout<<"MIN: "<<min_algebraic<<endl;
+    // cout<<"ID: "<<most_fit_id<<endl;
+    // cout<<endl;
+
+    // double most_fit_id = -1;
+    // double min_algebraic = 1.0e8;
+    // for(size_t i = 0; i < ship_cloud_layer.size(); i++){
+    //     pcl::PointCloud<pcl::PointXYZI> layer = ship_cloud_layer[i];
+    //     double sum = 0.0;
+    //     for(const auto& pt : layer){
+    //         sum += pow(algebraicDist(pt.x, pt.y, conic), 2) / layer.size();
+    //     }
+    //     if(sum < min_algebraic){
+    //         min_algebraic = sum;
+    //         most_fit_id = i;
+    //     }
+    // }
+    // cout<<"MIN: "<<min_algebraic<<endl;
+    // cout<<"ID: "<<most_fit_id<<endl;
+    // cout<<endl;
     //==================Visualization============
     geometry_msgs::TransformStamped ship_tf;
     ship_tf.header.frame_id = "base_link";
@@ -116,6 +185,7 @@ void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& 
     ship_tf.child_frame_id = "ship";
     ship_tf.transform.translation.x = centroid(0);
     ship_tf.transform.translation.y = centroid(1);
+    ship_tf.transform.translation.z = centroid(2);
     Eigen::Matrix3d rotation = Eigen::Matrix3d::Identity();
     rotation.block<2, 2>(0, 0) = V;
     Eigen::Quaterniond q(rotation);
@@ -128,21 +198,34 @@ void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& 
     visualization_msgs::Marker quadric;
     quadric.header.frame_id = "base_link";
     quadric.header.stamp = ros::Time::now();
-    quadric.type = visualization_msgs::Marker::SPHERE;
+    quadric.type = visualization_msgs::Marker::CYLINDER;
     quadric.pose.position.x = centroid(0);
     quadric.pose.position.y = centroid(1);
+    if(most_fit_id != -1){
+        quadric.pose.position.z = z_cut + z_thickness * most_fit_id;
+    }
+    else{
+        quadric.pose.position.z = centroid(2);
+    }
     quadric.pose.orientation = ship_tf.transform.rotation;
     quadric.color.a = 0.7;
     quadric.color.r = 255.0;
-    quadric.scale.x = 4 *sqrt(S(0, 0));
-    quadric.scale.y = 4* sqrt(S(1, 1));
-    quadric.scale.z = 1.0;
+    quadric.scale.x = 2* major_axis;
+    quadric.scale.y = 2* minor_axis;
+    quadric.scale.z = 0.1;
     pub_svd_quadric_.publish(quadric);
 
     sensor_msgs::PointCloud2 merged_scan;
-    pcl::toROSMsg(*ship_flatten, merged_scan);
+    //pcl::toROSMsg(ship_cloud_layer[most_fit_id], merged_scan);
+    pcl::toROSMsg(ship_reflection_cropped, merged_scan);
     merged_scan.header.frame_id = "base_link";
     merged_scan.header.stamp = ros::Time::now();
     pub_merged_scan_.publish(merged_scan);
     //===========================================
+    //cout<<"TIME: "<<(ros::Time::now() - tic).toSec()* 1000.0 <<"ms"<<endl;
+}
+
+double PointClassifier::algebraicDist(double x, double y, const Eigen::Matrix3d& conic){
+    Eigen::Vector3d point_h(x, y, 1.0);
+    return (point_h.transpose() * conic * point_h).value();
 }
