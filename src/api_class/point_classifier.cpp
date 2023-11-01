@@ -6,16 +6,16 @@ cloud2_sub_(nh_, "/ouster2/points", 1), sync_(ApproxPolicy(10), cloud1_sub_, clo
     sync_.registerCallback(boost::bind(&PointClassifier::pointSyncCallback, this, _1, _2));
 
     lidar1_tf_ = Eigen::Matrix4d::Identity();
-    lidar1_tf_(0, 3) = (3.325/ 2.0);
-    lidar1_tf_(1, 3) = -(1.415/ 2.0);
+    lidar1_tf_(0, 3) = (1.415/ 2.0);
+    lidar1_tf_(1, 3) = -(3.325/ 2.0);
     lidar1_tf_(0, 0) = cos(-M_PI/2);
     lidar1_tf_(0, 1) = -sin(-M_PI/2);
     lidar1_tf_(1, 0) = sin(-M_PI/2);
     lidar1_tf_(1, 1) = cos(-M_PI/2);
 
     lidar2_tf_ = Eigen::Matrix4d::Identity();
-    lidar2_tf_(0, 3) = -(3.325/ 2.0);
-    lidar2_tf_(1, 3) = (1.415/ 2.0);
+    lidar2_tf_(0, 3) = -(1.415/ 2.0);
+    lidar2_tf_(1, 3) = (3.325/ 2.0);
     lidar2_tf_(0, 0) = cos(M_PI/2);
     lidar2_tf_(0, 1) = -sin(M_PI/2);
     lidar2_tf_(1, 0) = sin(M_PI/2);
@@ -153,7 +153,6 @@ void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& 
         pcl::PointCloud<pcl::PointXYZI> layer = ship_cloud_layer[i];
         size_t cnt = 0;
         for(const auto& pt : layer){
-            //cout<<"TEST: "<<geometricDist(pt.x, pt.y, conic)<<endl;
             if(abs(geometricDist(pt.x, pt.y, conic)) < 0.1){
                 cnt++;
             }
@@ -221,7 +220,7 @@ void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& 
 
     sensor_msgs::PointCloud2 merged_scan;
     //pcl::toROSMsg(ship_cloud_layer[most_fit_id], merged_scan);
-    pcl::toROSMsg(ship_reflection_cropped, merged_scan);
+    pcl::toROSMsg(*cloud_range_filtered, merged_scan);
     merged_scan.header.frame_id = "base_link";
     merged_scan.header.stamp = ros::Time::now();
     pub_merged_scan_.publish(merged_scan);
