@@ -20,19 +20,32 @@ cloud2_sub_(nh_, "/ouster2/points", 1), sync_(ApproxPolicy(10), cloud1_sub_, clo
     lidar2_tf_(0, 1) = -sin(M_PI/2);
     lidar2_tf_(1, 0) = sin(M_PI/2);
     lidar2_tf_(1, 1) = cos(M_PI/2);
-    ec_.setClusterTolerance(1.0);
-    ec_.setMinClusterSize(5);
+    ec_.setClusterTolerance(3.0);
+    ec_.setMinClusterSize(100);
     pub_merged_scan_ = nh_.advertise<sensor_msgs::PointCloud2>("ouster_merged", 1);
     pub_svd_quadric_ = nh_.advertise<visualization_msgs::Marker>("ship_quadric", 1);
 
     pub_hull_points_ = nh_.advertise<sensor_msgs::PointCloud2>("hull_points", 1);
     pub_cabin_points_ = nh_.advertise<sensor_msgs::PointCloud2>("cabin_points", 1);
-
+    downsampler_.setLeafSize(0.4, 0.4, 0.1);
     spinner_.start();
 }
 
 PointClassifier::~PointClassifier(){
     spinner_.stop();
+}
+
+int PointClassifier::getRow(pcl::PointXYZI pt){
+    double altitude = atan2(pt.z, sqrt(pow(pt.x, 2) + pow(pt.y, 2))) * (180.0 / M_PI);
+    double vertical_resolution = (max_altitude - min_altitude_) / vertical_scans_;
+    return (altitude - min_altitude_) / vertical_resolution;
+}
+
+int PointClassifier::getCol(pcl::PointXYZI pt){
+    double bearing = atan2(pt.y, pt.x) * (180.0 / M_PI);
+    double horizontal_resolution = 360.0 / horizontal_scans_;
+    int id = (bearing + 180.0) / horizontal_resolution;
+    return id % horizontal_scans_;
 }
 
 void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& point1, const sensor_msgs::PointCloud2ConstPtr& point2){
@@ -44,188 +57,201 @@ void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& 
     pcl::PointCloud<pcl::PointXYZI> cloud1_tf, cloud2_tf;
     pcl::transformPointCloud(cloud1, cloud1_tf, lidar1_tf_);
     pcl::transformPointCloud(cloud2, cloud2_tf, lidar2_tf_);
-
-    pcl::PointCloud<pcl::PointXYZI> cloud_sum = cloud1_tf + cloud2_tf;
-    pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_range_filtered(new pcl::PointCloud<pcl::PointXYZI>);
-    for(const auto& pt : cloud_sum){
-        double range = sqrt(pow(pt.x, 2) + pow(pt.y, 2) + pow(pt.z, 2));
-        if(range > 7.0){
-            cloud_range_filtered->push_back(pt);
+    pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_merged(new pcl::PointCloud<pcl::PointXYZI>);
+    pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_merged_range(new pcl::PointCloud<pcl::PointXYZI>);
+    *cloud_merged += cloud1_tf;
+    *cloud_merged += cloud2_tf;
+    for(const auto& pt : *cloud_merged){
+        double r = sqrt(pow(pt.x, 2) + pow(pt.y, 2) + pow(pt.z, 2));
+        if(r > 7.0 && r < 50.0){
+            cloud_merged_range->push_back(pt);
         }
     }
-    pcl::search::KdTree<pcl::PointXYZI>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZI>);
-    tree->setInputCloud(cloud_range_filtered);
-    ec_.setSearchMethod(tree);
-    ec_.setInputCloud(cloud_range_filtered);
-    vector<pcl::PointIndices> cluster_indices;
-    ec_.extract(cluster_indices);
-
-    if(cluster_indices.empty()){
-        return;
+    cv::Mat lidar1_img = cv::Mat::zeros(vertical_scans_, horizontal_scans_, CV_64F);
+    cv::Mat lidar2_img = cv::Mat::zeros(vertical_scans_, horizontal_scans_, CV_64F);
+    for(const auto& pt : cloud1){
+        double range = sqrt(pow(pt.x, 2) + pow(pt.y, 2));
+        if(range < 7.0){
+            continue;
+        }
+        int col = getCol(pt);
+        int row = getRow(pt);     
+        if(row < 0 || row >= lidar1_img.rows){
+            continue;
+        }
+        lidar1_img.at<double>(row, col) = range;
     }
-    sort(cluster_indices.begin(), cluster_indices.end(), [](const pcl::PointIndices& p1, const pcl::PointIndices& p2){
-        return p1.indices.size() > p2.indices.size();
-    });
-
-    pcl::PointCloud<pcl::PointXYZI> ship_cloud;
-    for(const auto& id: cluster_indices[0].indices){
-        ship_cloud.push_back((*cloud_range_filtered)[id]);
+    for(const auto& pt : cloud2){
+        double range = sqrt(pow(pt.x, 2) + pow(pt.y, 2));
+        if(range < 7.0){
+            continue;
+        }
+        int col = getCol(pt);
+        int row = getRow(pt);     
+        if(row < 0 || row >= lidar2_img.rows){
+            continue;
+        }
+        lidar2_img.at<double>(row, col) = range;
     }
+
+    pcl::PointCloud<pcl::PointXYZI>::Ptr edge_points(new pcl::PointCloud<pcl::PointXYZI>);
+    for(int col = 0; col < lidar1_img.cols; col++){
+        double min_range = 100000.0;
+        int min_row = -1;
+        for(int row = 0; row < lidar1_img.rows; row++){
+            double range = lidar1_img.at<double>(row, col);
+            if(range == 0.0){
+                continue;
+            }
+            if(range < min_range){
+                min_range = range;
+                min_row = row;
+            }
+        }
+        if(min_row != -1){
+            double range =lidar1_img.at<double>(min_row, col);
+            Eigen::Vector4d point_restore, point_restore_tf;
+            double horizontal_resolution = 360.0 / horizontal_scans_;
+            double vertical_resolution = (max_altitude - min_altitude_) / vertical_scans_;
+            point_restore(0) = range * cos(DEG2RAD(-180.0 + col * horizontal_resolution));
+            point_restore(1) = range * sin(DEG2RAD(-180.0 + col * horizontal_resolution));
+            point_restore(2) = 0.0; //range* tan(DEG2RAD(min_altitude_ + min_row * vertical_resolution));
+            point_restore(3) = 1.0;
+            point_restore_tf = lidar1_tf_ * point_restore;
+            
+            pcl::PointXYZI pt;
+            pt.x = point_restore_tf(0);
+            pt.y = point_restore_tf(1);
+            pt.z = 0.0;
+            edge_points->push_back(pt);
+        }
+    }
+
+    for(int col = 0; col < lidar2_img.cols; col++){
+        double min_range = 100000.0;
+        int min_row = -1;
+        for(int row = 0; row < lidar2_img.rows; row++){
+            double range = lidar2_img.at<double>(row, col);
+            if(range == 0.0){
+                continue;
+            }
+            if(range < min_range){
+                min_range = range;
+                min_row = row;
+            }
+        }
+        if(min_row != -1){
+            double range =lidar2_img.at<double>(min_row, col);
+            Eigen::Vector4d point_restore, point_restore_tf;
+            double horizontal_resolution = 360.0 / horizontal_scans_;
+            double vertical_resolution = (max_altitude - min_altitude_) / vertical_scans_;
+            point_restore(0) = range * cos(DEG2RAD(-180.0 + col * horizontal_resolution));
+            point_restore(1) = range * sin(DEG2RAD(-180.0 + col * horizontal_resolution));
+            point_restore(2) = 0.0; //range* tan(DEG2RAD(min_altitude_ + min_row * vertical_resolution));
+            point_restore(3) = 1.0;
+            point_restore_tf = lidar2_tf_ * point_restore;
+            
+            pcl::PointXYZI pt;
+            pt.x = point_restore_tf(0);
+            pt.y = point_restore_tf(1);
+            pt.z = 0.0;
+            edge_points->push_back(pt);
+        }
+    }
+    pcl::search::KdTree<pcl::PointXYZI> edge_kdtree;
+    edge_kdtree.setInputCloud(edge_points); 
+    // downsampler_.setInputCloud(cloud_merged_range);
+    // downsampler_.filter(*cloud_merged_range);
+    pcl::search::KdTree<pcl::PointXYZI>::Ptr kdtree(new pcl::search::KdTree<pcl::PointXYZI>);
+    kdtree->setInputCloud(cloud_merged_range);
+    vector<pcl::PointIndices> indices;
+    ec_.setSearchMethod(kdtree);
+    ec_.setInputCloud(cloud_merged_range);
+    ec_.extract(indices);
     
-    double z_cut = 0.0;
-    double z_max = -1000.0;
-    double z_thickness = 0.1;
-
-    for(size_t i = 0; i < ship_cloud.size(); i++){
-        z_cut += ship_cloud[i].z / ship_cloud.size();
-    }
-
-    pcl::PointCloud<pcl::PointXYZI> ship_reflection_cropped;
-    pcl::PointCloud<pcl::PointXYZI>::Ptr ship_flatten(new pcl::PointCloud<pcl::PointXYZI>);
-    Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
-    for(const auto& pt : ship_cloud){
-        auto point = pt;
-        point.z = 0.0;
-        if(pt.z > z_cut){
-            ship_flatten->push_back(point);
-            ship_reflection_cropped.push_back(pt);
+    pcl::PointCloud<pcl::PointXYZI> hull_cloud, cabin_cloud;
+    for(int ship_id = 0; ship_id < indices.size(); ship_id++){
+        pcl::PointCloud<pcl::PointXYZI> ship_points;
+        for(const auto& id : indices[ship_id].indices){
+            ship_points.push_back((*cloud_merged_range)[id]);
+        }
+        double z_max = -10000.0;
+        double z_min = 10000.0;
+        double z_thickness = 0.1;
+        for(const auto& pt : ship_points){
             if(pt.z > z_max){
                 z_max = pt.z;
             }
-        }
-    }
-
-    for(const auto& pt : ship_reflection_cropped){
-        Eigen::Vector3d v(pt.x, pt.y, pt.z);
-        v /= ship_flatten->size();
-        centroid += v;
-    }
-
-    Eigen::MatrixXd disp_mat(2, ship_flatten->size());
-    for(size_t i = 0; i < ship_flatten->size(); i++){
-        auto pt = (*ship_flatten)[i];
-        Eigen::Vector2d v(pt.x, pt.y);
-        Eigen::Vector2d error = v - centroid.block<2, 1>(0, 0);
-        disp_mat.col(i) = error;
-    }
-    Eigen::Matrix2d cov = disp_mat * disp_mat.transpose();
-    cov = cov/ ship_flatten->size();
-    Eigen::JacobiSVD<Eigen::Matrix2d> svd(cov, Eigen::ComputeFullU | Eigen::ComputeFullV);
-
-    auto V = svd.matrixV();
-    auto S = svd.singularValues().asDiagonal().toDenseMatrix();
-    auto U = svd.matrixU();
-    // cout<<(cov - U * S * V.transpose())<<endl;
-    if(V(0, 0) * V(1, 1) < 0){
-        V.col(0) *= -1;
-    }
-
-    double major_axis = S(0, 0);//2* sqrt(S(0, 0));
-    double minor_axis = S(1, 1);//2* sqrt(S(1, 1));
-    //===========Extract Conic Matrix=========
-    Eigen::Matrix3d conic = Eigen::Matrix3d::Zero();
-    Eigen::Matrix3d H = Eigen::Matrix3d::Identity();
-    H.block<2, 2>(0, 0) = V;
-    H(0, 2) = centroid(0);
-    H(1, 2) = centroid(1);
-    conic(0, 0) = pow(1.0 / major_axis, 2);
-    conic(1, 1) = pow(1.0 / minor_axis, 2);
-    conic(2, 2) = -1;
-    conic = (H.inverse()).transpose() * conic * H.inverse();
-    // cout<<conic<<endl;
-    // cout<<endl;
-    //========================================
-    
-    vector<pcl::PointCloud<pcl::PointXYZI>> ship_cloud_layer;
-    for(double z = z_cut; z <= z_max; z += z_thickness){ // Splitting Ship Pointcloud
-        pcl::PointCloud<pcl::PointXYZI> layer_cloud;
-        for(const auto& pt : ship_reflection_cropped){
-            if(pt.z >= z && pt.z < z + z_thickness){
-                layer_cloud.push_back(pt);
+            if(pt.z < z_min){
+                z_min = pt.z;
             }
         }
-        ship_cloud_layer.push_back(layer_cloud);
-    }
+        if(z_min >= z_max){
+            continue;
+        }
+        vector<pcl::PointCloud<pcl::PointXYZI>> ship_layer;
+        ship_layer.resize(ceil((z_max - z_min)/z_thickness));
+        for(const auto& pt : ship_points){
+            int layer = (pt.z - z_min)/z_thickness;
+            if(layer < 0 || layer >= ship_layer.size()){
+                continue;
+            }
+            ship_layer[layer].push_back(pt);
+        }
 
-    int most_fit_id = -1;
-    size_t max_fit_points = 0;
-    for(int i = ship_cloud_layer.size()-1; i >=0; i--){
-        pcl::PointCloud<pcl::PointXYZI> layer = ship_cloud_layer[i];
-        size_t cnt = 0;
-        for(const auto& pt : layer){
-            if(abs(geometricDist(pt.x, pt.y, conic)) < 0.1){
-                cnt++;
+        size_t max_fit_cnt = 0;
+        int max_fit_layer = -1;
+        for(int layer = 0; layer < ship_layer.size(); layer++){
+            size_t fit_count = 0;
+            for(const auto& pt : ship_layer[layer]){
+                vector<int> ids;
+                vector<float> dists;
+                pcl::PointXYZI search_pt;
+                search_pt.x = pt.x;
+                search_pt.y = pt.y;
+                search_pt.z = 0.0;
+                edge_kdtree.nearestKSearch(search_pt, 1, ids, dists);
+                if(dists[0] < 0.1){
+                    fit_count++;
+                }
+            }
+            if(fit_count > max_fit_cnt){
+                max_fit_cnt = fit_count;
+                max_fit_layer = layer;
             }
         }
-        if(max_fit_points < cnt){
-            max_fit_points = cnt;
-            most_fit_id = i;
+        if(max_fit_layer == -1){
+            continue;
         }
+        for(int layer = ship_layer.size()-1; layer > 0; layer--){
+            if(layer > max_fit_layer){
+                cabin_cloud += ship_layer[layer];
+            }
+            else{
+                hull_cloud += ship_layer[layer];
+            }
+        }
+        
     }
+    sensor_msgs::PointCloud2 ouster_merged_ros;
+    pcl::toROSMsg(*cloud_merged_range, ouster_merged_ros);
+    ouster_merged_ros.header.stamp = ros::Time::now();
+    ouster_merged_ros.header.frame_id = "base_link";
+    pub_merged_scan_.publish(ouster_merged_ros);
 
-    pcl::PointCloud<pcl::PointXYZI> hull_cloud, cabin_cloud;
-    for(int id = 0; id <= most_fit_id; id++){
-        hull_cloud += ship_cloud_layer[id];
-    }
-    for(int id = most_fit_id; id < ship_cloud_layer.size(); id++){
-        cabin_cloud += ship_cloud_layer[id];
-    }
-    sensor_msgs::PointCloud2 hull_cloud_ros, cabin_cloud_ros;
+    sensor_msgs::PointCloud2 hull_cloud_ros;
     pcl::toROSMsg(hull_cloud, hull_cloud_ros);
-    hull_cloud_ros.header.frame_id = "base_link";
-    hull_cloud_ros.header.stamp = ros::Time::now();
+    hull_cloud_ros.header = ouster_merged_ros.header;
     pub_hull_points_.publish(hull_cloud_ros);
 
+    sensor_msgs::PointCloud2 cabin_cloud_ros;
     pcl::toROSMsg(cabin_cloud, cabin_cloud_ros);
-    cabin_cloud_ros.header.frame_id = "base_link";
-    cabin_cloud_ros.header.stamp = ros::Time::now();
+    cabin_cloud_ros.header = ouster_merged_ros.header;
     pub_cabin_points_.publish(cabin_cloud_ros);
-
-    //==================Visualization============
-    geometry_msgs::TransformStamped ship_tf;
-    ship_tf.header.frame_id = "base_link";
-    ship_tf.header.stamp = ros::Time::now();
-    ship_tf.child_frame_id = "ship";
-    ship_tf.transform.translation.x = centroid(0);
-    ship_tf.transform.translation.y = centroid(1);
-    ship_tf.transform.translation.z = centroid(2);
-    Eigen::Matrix3d rotation = Eigen::Matrix3d::Identity();
-    rotation.block<2, 2>(0, 0) = V;
-    Eigen::Quaterniond q(rotation);
-    ship_tf.transform.rotation.w = q.w();
-    ship_tf.transform.rotation.x = q.x();
-    ship_tf.transform.rotation.y = q.y();
-    ship_tf.transform.rotation.z = q.z();
-    broadcaster_.sendTransform(ship_tf);
-
-    visualization_msgs::Marker quadric;
-    quadric.header.frame_id = "base_link";
-    quadric.header.stamp = ros::Time::now();
-    quadric.type = visualization_msgs::Marker::CYLINDER;
-    quadric.pose.position.x = centroid(0);
-    quadric.pose.position.y = centroid(1);
-    if(most_fit_id != -1){
-        quadric.pose.position.z = z_cut + z_thickness * most_fit_id;
-    }
-    else{
-        quadric.pose.position.z = centroid(2);
-    }
-    quadric.pose.orientation = ship_tf.transform.rotation;
-    quadric.color.a = 0.7;
-    quadric.color.r = 255.0;
-    quadric.scale.x = 2* major_axis;
-    quadric.scale.y = 2* minor_axis;
-    quadric.scale.z = 0.1;
-    pub_svd_quadric_.publish(quadric);
-
-    sensor_msgs::PointCloud2 merged_scan;
-    //pcl::toROSMsg(ship_cloud_layer[most_fit_id], merged_scan);
-    pcl::toROSMsg(*cloud_range_filtered, merged_scan);
-    merged_scan.header.frame_id = "base_link";
-    merged_scan.header.stamp = ros::Time::now();
-    pub_merged_scan_.publish(merged_scan);
-    //===========================================
-    //cout<<"TIME: "<<(ros::Time::now() - tic).toSec()* 1000.0 <<"ms"<<endl;
+    // sensor_msgs::PointCloud2 edge_points_ros;
+    // pcl::toROSMsg(*edge_points, edge_points_ros);
+    // edge_points_ros.header = ouster_merged_ros.header;
+    // pub_hull_points_.publish(edge_points_ros);
 }
 
 double PointClassifier::algebraicDist(double x, double y, const Eigen::Matrix3d& conic){
