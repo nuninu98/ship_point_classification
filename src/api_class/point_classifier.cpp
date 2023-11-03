@@ -163,8 +163,8 @@ void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& 
     }
     pcl::search::KdTree<pcl::PointXYZI> edge_kdtree;
     edge_kdtree.setInputCloud(edge_points); 
-    // downsampler_.setInputCloud(cloud_merged_range);
-    // downsampler_.filter(*cloud_merged_range);
+    downsampler_.setInputCloud(cloud_merged_range);
+    downsampler_.filter(*cloud_merged_range);
     pcl::search::KdTree<pcl::PointXYZI>::Ptr kdtree(new pcl::search::KdTree<pcl::PointXYZI>);
     kdtree->setInputCloud(cloud_merged_range);
     vector<pcl::PointIndices> indices;
@@ -178,7 +178,7 @@ void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& 
         pcl::PointCloud<pcl::PointXYZI> ship_points;
         double z_max = -1000.0;
         double z_min = 1000.0;
-        double thick = 0.4;
+        double thick = 0.3;
         for(const auto& id : indices[ship_id].indices){
             ship_points.push_back((*cloud_merged_range)[id]);
             if((*cloud_merged_range)[id].z > z_max){
@@ -260,7 +260,13 @@ void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& 
                 }
             }
         }
-        
+
+        for(int layer = 0; layer < best_layer; layer++){
+            hull_cloud += ship_layers[layer];
+        }
+        for(int layer = best_layer + 1; layer < ship_layers.size(); layer++){
+            cabin_cloud += ship_layers[layer];
+        }
         
         
     }
