@@ -22,6 +22,9 @@
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
+#include <unordered_set>
+#include <pcl/segmentation/region_growing.h>
+#include <pcl/features/normal_3d.h>
 typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::PointCloud2, sensor_msgs::PointCloud2> ApproxPolicy;
 using namespace std;
 class PointClassifier{
@@ -51,6 +54,8 @@ class PointClassifier{
         //============================
         pcl::VoxelGrid<pcl::PointXYZI> downsampler_;
         ros::Publisher pub_hull_points_, pub_cabin_points_;
+        pcl::NormalEstimation<pcl::PointXYZI, pcl::Normal> ne_;
+        pcl::RegionGrowing<pcl::PointXYZI, pcl::Normal> reg_;
     public:
         PointClassifier();
 

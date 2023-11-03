@@ -16,11 +16,12 @@ cloud2_sub_(nh_, "/ouster2/points", 1), sync_(ApproxPolicy(10), cloud1_sub_, clo
     lidar2_tf_ = Eigen::Matrix4d::Identity();
     lidar2_tf_(0, 3) = -(1.415/ 2.0);
     lidar2_tf_(1, 3) = (3.325/ 2.0);
+    lidar1_tf_(2, 3) = 0.8;
     lidar2_tf_(0, 0) = cos(M_PI/2);
     lidar2_tf_(0, 1) = -sin(M_PI/2);
     lidar2_tf_(1, 0) = sin(M_PI/2);
     lidar2_tf_(1, 1) = cos(M_PI/2);
-    ec_.setClusterTolerance(3.0);
+    ec_.setClusterTolerance(0.5);
     ec_.setMinClusterSize(100);
     pub_merged_scan_ = nh_.advertise<sensor_msgs::PointCloud2>("ouster_merged", 1);
     pub_svd_quadric_ = nh_.advertise<visualization_msgs::Marker>("ship_quadric", 1);
@@ -28,6 +29,8 @@ cloud2_sub_(nh_, "/ouster2/points", 1), sync_(ApproxPolicy(10), cloud1_sub_, clo
     pub_hull_points_ = nh_.advertise<sensor_msgs::PointCloud2>("hull_points", 1);
     pub_cabin_points_ = nh_.advertise<sensor_msgs::PointCloud2>("cabin_points", 1);
     downsampler_.setLeafSize(0.4, 0.4, 0.1);
+
+    ne_.setKSearch(5);
     spinner_.start();
 }
 
@@ -171,66 +174,94 @@ void PointClassifier::pointSyncCallback(const sensor_msgs::PointCloud2ConstPtr& 
     
     pcl::PointCloud<pcl::PointXYZI> hull_cloud, cabin_cloud;
     for(int ship_id = 0; ship_id < indices.size(); ship_id++){
+        pcl::search::KdTree<pcl::PointXYZI>::Ptr ship_tree(new pcl::search::KdTree<pcl::PointXYZI>);
         pcl::PointCloud<pcl::PointXYZI> ship_points;
+        double z_max = -1000.0;
+        double z_min = 1000.0;
+        double thick = 0.4;
         for(const auto& id : indices[ship_id].indices){
             ship_points.push_back((*cloud_merged_range)[id]);
-        }
-        double z_max = -10000.0;
-        double z_min = 10000.0;
-        double z_thickness = 0.1;
-        for(const auto& pt : ship_points){
-            if(pt.z > z_max){
-                z_max = pt.z;
+            if((*cloud_merged_range)[id].z > z_max){
+                z_max = (*cloud_merged_range)[id].z;
             }
-            if(pt.z < z_min){
-                z_min = pt.z;
+            if((*cloud_merged_range)[id].z < z_min){
+                z_min = (*cloud_merged_range)[id].z;
             }
         }
-        if(z_min >= z_max){
+        if(z_max <= z_min){
             continue;
         }
-        vector<pcl::PointCloud<pcl::PointXYZI>> ship_layer;
-        ship_layer.resize(ceil((z_max - z_min)/z_thickness));
-        for(const auto& pt : ship_points){
-            int layer = (pt.z - z_min)/z_thickness;
-            if(layer < 0 || layer >= ship_layer.size()){
-                continue;
-            }
-            ship_layer[layer].push_back(pt);
+        vector<pcl::PointCloud<pcl::PointXYZI>> ship_layers;
+        ship_layers.resize(ceil((z_max -z_min) / thick) + 1);
+        for(auto pt : ship_points){
+            int layer = (pt.z - z_min) / thick;
+            ship_layers[layer].push_back(pt);
         }
-
-        size_t max_fit_cnt = 0;
-        int max_fit_layer = -1;
-        for(int layer = 0; layer < ship_layer.size(); layer++){
-            size_t fit_count = 0;
-            for(const auto& pt : ship_layer[layer]){
+        // pcl::PointCloud<pcl::PointXYZI>::Ptr ship_points_ptr (new pcl::PointCloud<pcl::PointXYZI>(ship_points));
+        // pcl::PointCloud <pcl::Normal>::Ptr normals (new pcl::PointCloud <pcl::Normal>);
+        // ne_.setSearchMethod(ship_tree);
+        // ne_.setInputCloud(ship_points_ptr);
+        // ne_.compute(*normals);
+        // reg_.setSearchMethod(ship_tree);
+        // reg_.setInputNormals(normals);
+        // reg_.setInputCloud(ship_points_ptr);
+        // reg_.setSmoothnessThreshold(10.0 / 180.0 * M_PI);
+        // reg_.setCurvatureThreshold(1.0);
+        // vector<pcl::PointIndices> clusters;
+        // reg_.extract(clusters);
+        // sort(clusters.begin(), clusters.end(), [](const pcl::PointIndices& arr1, const pcl::PointIndices& arr2){
+        //     return arr1.indices.size() > arr2.indices.size();
+        // });
+        // for(auto id : clusters[0].indices){
+        //     hull_cloud.push_back((*ship_points_ptr)[id]);
+        // }
+        int best_match_cnt = 0;
+        int best_layer = -1;
+        for(int layer = ship_layers.size() -1; layer >= 0; layer--){
+            int cnt = 0;
+            unordered_set<int> edge_matched_ids;
+            sort(ship_layers[layer].begin(), ship_layers[layer].end(), [](const pcl::PointXYZI& p1, const pcl::PointXYZI& p2){
+                return p1.z > p2.z;
+            });
+            for(int i = 0; i < ship_layers[layer].size(); i++){
+                pcl::PointXYZI search_pt = ship_layers[layer][i];
+                search_pt.z = 0.0;
                 vector<int> ids;
                 vector<float> dists;
-                pcl::PointXYZI search_pt;
-                search_pt.x = pt.x;
-                search_pt.y = pt.y;
-                search_pt.z = 0.0;
                 edge_kdtree.nearestKSearch(search_pt, 1, ids, dists);
-                if(dists[0] < 0.1){
-                    fit_count++;
+                if(edge_matched_ids.find(ids[0]) == edge_matched_ids.end()){
+                    if(dists[0] < 0.15){
+                        cnt++;
+                        edge_matched_ids.insert(ids[0]);
+                        //hull_cloud.push_back(ship_points[i]);
+                    }
                 }
             }
-            if(fit_count > max_fit_cnt){
-                max_fit_cnt = fit_count;
-                max_fit_layer = layer;
+            if(best_match_cnt < cnt){
+                best_match_cnt = cnt;
+                best_layer = layer;
             }
         }
-        if(max_fit_layer == -1){
+        if(best_layer == -1){
             continue;
         }
-        for(int layer = ship_layer.size()-1; layer > 0; layer--){
-            if(layer > max_fit_layer){
-                cabin_cloud += ship_layer[layer];
-            }
-            else{
-                hull_cloud += ship_layer[layer];
+        // cout<<"BEST: "<<best_layer<<" /"<<ship_layers.size()<<endl;
+        unordered_set<int> edge_matched_ids;
+        for(int i = 0; i < ship_layers[best_layer].size(); i++){
+            pcl::PointXYZI search_pt = ship_layers[best_layer][i];
+            search_pt.z = 0.0;
+            vector<int> ids;
+            vector<float> dists;
+            edge_kdtree.nearestKSearch(search_pt, 1, ids, dists);
+            if(edge_matched_ids.find(ids[0]) == edge_matched_ids.end()){
+                if(dists[0] < 0.15){
+                    edge_matched_ids.insert(ids[0]);
+                    hull_cloud.push_back(ship_layers[best_layer][i]);
+                }
             }
         }
+        
+        
         
     }
     sensor_msgs::PointCloud2 ouster_merged_ros;
